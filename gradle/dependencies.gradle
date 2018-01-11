@@ -86,6 +86,7 @@ ext {
       testRules              : "com.android.support.test:rules:${version.testRunnerVersion}",
       testEspressoCore       : "com.android.support.test.espresso:espresso-core:${version.espressoVersion}",
       testEspressoIntents    : "com.android.support.test.espresso:espresso-intents:${version.espressoVersion}",
+      testEspressoContrib    : "com.android.support.test.espresso:espresso-contrib:${version.espressoVersion}",
 
       // unit test
       junit                  : "junit:junit:${version.junit}",
