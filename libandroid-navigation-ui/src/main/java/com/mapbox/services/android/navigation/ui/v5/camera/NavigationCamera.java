@@ -1,24 +1,35 @@
 package com.mapbox.services.android.navigation.ui.v5.camera;
 
+import android.animation.Animator;
+import android.animation.AnimatorSet;
+import android.animation.TypeEvaluator;
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.location.Location;
 import android.support.annotation.NonNull;
 import android.util.SparseArray;
 import android.view.View;
+import android.view.animation.DecelerateInterpolator;
+import android.view.animation.LinearInterpolator;
 
 import com.mapbox.api.directions.v5.models.DirectionsRoute;
+import com.mapbox.core.constants.Constants;
 import com.mapbox.geojson.Point;
 import com.mapbox.mapboxsdk.camera.CameraPosition;
 import com.mapbox.mapboxsdk.camera.CameraUpdateFactory;
 import com.mapbox.mapboxsdk.geometry.LatLng;
 import com.mapbox.mapboxsdk.maps.MapboxMap;
-import com.mapbox.core.constants.Constants;
 import com.mapbox.services.android.navigation.v5.navigation.MapboxNavigation;
 import com.mapbox.services.android.navigation.v5.routeprogress.ProgressChangeListener;
 import com.mapbox.services.android.navigation.v5.routeprogress.RouteProgress;
+import com.mapbox.services.api.utils.turf.TurfConstants;
 import com.mapbox.services.commons.geojson.LineString;
-import com.mapbox.turf.TurfConstants;
 import com.mapbox.turf.TurfMeasurement;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import timber.log.Timber;
 
 import static android.content.res.Configuration.ORIENTATION_LANDSCAPE;
 import static android.content.res.Configuration.ORIENTATION_PORTRAIT;
@@ -33,8 +44,8 @@ import static android.content.res.Configuration.ORIENTATION_PORTRAIT;
  */
 public class NavigationCamera implements ProgressChangeListener {
 
-  private static final int CAMERA_TILT = 45;
-  private static int CAMERA_ZOOM = 17;
+  private static final double CAMERA_TILT = 45;
+  private static double CAMERA_ZOOM = 17;
 
   private MapboxMap mapboxMap;
   private MapboxNavigation navigation;
@@ -68,10 +79,30 @@ public class NavigationCamera implements ProgressChangeListener {
    */
   public void start(DirectionsRoute route) {
     if (route != null) {
-      currentCameraPosition = buildCameraPositionFromRoute(route);
-      animateCameraToPosition(currentCameraPosition);
-    } else {
-      navigation.addProgressChangeListener(NavigationCamera.this);
+      LineString lineString = LineString.fromPolyline(route.geometry(), Constants.PRECISION_6);
+
+      double initialBearing = TurfMeasurement.bearing(
+        Point.fromLngLat(
+          lineString.getCoordinates().get(0).getLongitude(), lineString.getCoordinates().get(0).getLatitude()
+        ),
+        Point.fromLngLat(
+          lineString.getCoordinates().get(1).getLongitude(), lineString.getCoordinates().get(1).getLatitude()
+        )
+      );
+
+      Point targetPoint = TurfMeasurement.destination(
+        Point.fromLngLat(
+          lineString.getCoordinates().get(0).getLongitude(), lineString.getCoordinates().get(0).getLatitude()
+        ),
+        targetDistance, initialBearing, TurfConstants.UNIT_METERS
+      );
+
+      LatLng targetLatLng = new LatLng(
+        targetPoint.latitude(),
+        targetPoint.longitude()
+      );
+
+      createApproachAnimator(mapboxMap.getCameraPosition(), targetLatLng, CAMERA_ZOOM, initialBearing, CAMERA_TILT).start();
     }
   }
 
@@ -86,12 +117,12 @@ public class NavigationCamera implements ProgressChangeListener {
    * @since 0.6.0
    */
   public void resume(Location location) {
-    if (location != null) {
-      currentCameraPosition = buildCameraPositionFromLocation(location);
-      animateCameraToPosition(currentCameraPosition);
-    } else {
-      navigation.addProgressChangeListener(NavigationCamera.this);
-    }
+//    if (location != null) {
+//      currentCameraPosition = buildCameraPositionFromLocation(location);
+//      animateCameraToPosition(currentCameraPosition);
+//    } else {
+//      navigation.addProgressChangeListener(NavigationCamera.this);
+//    }
   }
 
   /**
@@ -107,8 +138,65 @@ public class NavigationCamera implements ProgressChangeListener {
   @Override
   public void onProgressChange(Location location, RouteProgress routeProgress) {
     if (location.getLongitude() != 0 && location.getLatitude() != 0) {
-      easeCameraToLocation(location);
+
+      // Target bearing
+      double targetBearing = location.getBearing();
+      Timber.d("Target bearing: " + targetBearing);
+
+      double distanceRemaining = routeProgress.currentLegProgress().currentStepProgress().distanceRemaining();
+      Timber.d("Distance remaining: " + distanceRemaining);
+      double targetTilt;
+      if (distanceRemaining > 200) {
+        targetTilt = CAMERA_TILT;
+      } else if (distanceRemaining > 150) {
+        targetTilt = 35;
+      } else if (distanceRemaining > 100) {
+        targetTilt = 25;
+      } else if (distanceRemaining > 50) {
+        targetTilt = 15;
+      } else {
+        targetTilt = 0;
+      }
+
+      LatLng targetLatLng = createTargetLatLng(location, targetTilt);
+
+      createFollowAnimator(mapboxMap.getCameraPosition(), targetLatLng, CAMERA_ZOOM, targetBearing, targetTilt).start();
     }
+  }
+
+  @NonNull
+  private LatLng createTargetLatLng(Location location, double targetTilt) {
+
+    double modifiedTargetDistance = targetDistance;
+
+    switch ((int) targetTilt) {
+      case 35:
+        modifiedTargetDistance = modifiedTargetDistance - (modifiedTargetDistance * .25);
+        break;
+      case 25:
+        modifiedTargetDistance = modifiedTargetDistance - (modifiedTargetDistance * .50);
+        break;
+      case 15:
+        modifiedTargetDistance = modifiedTargetDistance - (modifiedTargetDistance * .75);
+        break;
+      case 0:
+        modifiedTargetDistance = 0;
+        break;
+      default:
+        break;
+    }
+
+    Timber.d("Target distance: %s", modifiedTargetDistance);
+
+    Point targetPoint = TurfMeasurement.destination(
+      Point.fromLngLat(location.getLongitude(), location.getLatitude()),
+      modifiedTargetDistance, location.getBearing(), TurfConstants.UNIT_METERS
+    );
+
+    return new LatLng(
+      targetPoint.latitude(),
+      targetPoint.longitude()
+    );
   }
 
   /**
@@ -144,107 +232,130 @@ public class NavigationCamera implements ProgressChangeListener {
     }
   }
 
-  /**
-   * Will animate the {@link MapboxMap} to the given {@link CameraPosition}
-   * with a 2 second duration.
-   * <p>
-   * If a user interacts with the {@link MapboxMap} while the animation is in progress,
-   * the animation will be cancelled.  So it's important to add the {@link ProgressChangeListener}
-   * in both onCancel() and onFinish() scenarios.
-   *
-   * @param position to which the camera should animate
-   */
-  private void animateCameraToPosition(CameraPosition position) {
-    mapboxMap.animateCamera(CameraUpdateFactory.newCameraPosition(position), 2000,
-      new MapboxMap.CancelableCallback() {
-        @Override
-        public void onCancel() {
-          navigation.addProgressChangeListener(NavigationCamera.this);
-        }
-
-        @Override
-        public void onFinish() {
-          navigation.addProgressChangeListener(NavigationCamera.this);
-        }
-      });
+  private Animator createFollowAnimator(CameraPosition currentPosition, LatLng targetLatLng, double targetZoom,
+                                        double targetBearing, double targetTilt) {
+    AnimatorSet animatorSet = new AnimatorSet();
+    List<Animator> animators = new ArrayList<>();
+    animators.add(createZoomAnimator(currentPosition.zoom, targetZoom, 1000));
+    animators.add(createBearingAnimator(currentPosition.bearing, targetBearing));
+    animators.add(createTiltAnimator(currentPosition.tilt, targetTilt));
+    animators.add(createLatLngAnimator(currentPosition.target, targetLatLng, 1000));
+    animatorSet.playTogether(animators);
+    return animatorSet;
   }
 
-  private void easeCameraToLocation(Location location) {
-    currentCameraPosition = buildCameraPositionFromLocation(location);
-    if (trackingEnabled) {
-      mapboxMap.easeCamera(CameraUpdateFactory.newCameraPosition(currentCameraPosition), 1000, false);
+  private Animator createApproachAnimator(CameraPosition currentPosition, LatLng targetLatLng, double targetZoom,
+                                        double targetBearing, double targetTilt) {
+    AnimatorSet animatorSet = new AnimatorSet();
+    List<Animator> animators = new ArrayList<>();
+    animators.add(createZoomAnimator(currentPosition.zoom, targetZoom, 3000));
+    animators.add(createLatLngAnimator(currentPosition.target, targetLatLng, 3000));
+//    animatorSet.add(createBearingAnimator(currentPosition.bearing, targetBearing));
+//    animatorSet.add(createTiltAnimator(currentPosition.tilt, targetTilt));
+    animatorSet.playSequentially(animators);
+    animatorSet.addListener(new Animator.AnimatorListener() {
+      @Override
+      public void onAnimationStart(Animator animation) {
+
+      }
+
+      @Override
+      public void onAnimationEnd(Animator animation) {
+        navigation.addProgressChangeListener(NavigationCamera.this);
+
+      }
+
+      @Override
+      public void onAnimationCancel(Animator animation) {
+        navigation.addProgressChangeListener(NavigationCamera.this);
+      }
+
+      @Override
+      public void onAnimationRepeat(Animator animation) {
+
+      }
+    });
+
+    return animatorSet;
+  }
+
+  private Animator createLatLngAnimator(LatLng currentPosition, LatLng targetPosition, long duration) {
+    // Create animator from current position to target position
+    ValueAnimator latLngAnimator = ValueAnimator.ofObject(new LatLngEvaluator(), currentPosition, targetPosition);
+    latLngAnimator.setDuration(duration);
+    latLngAnimator.setInterpolator(new LinearInterpolator());
+    latLngAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+      @Override
+      public void onAnimationUpdate(ValueAnimator animation) {
+        mapboxMap.setLatLng((LatLng) animation.getAnimatedValue());
+      }
+    });
+    return latLngAnimator;
+  }
+
+  private Animator createZoomAnimator(double currentZoom, double targetZoom, long duration) {
+    ValueAnimator zoomAnimator = ValueAnimator.ofFloat((float) currentZoom, (float) targetZoom);
+    zoomAnimator.setDuration(duration);
+    zoomAnimator.setInterpolator(new LinearInterpolator());
+    zoomAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+      @Override
+      public void onAnimationUpdate(ValueAnimator animation) {
+        mapboxMap.setZoom((Float) animation.getAnimatedValue());
+      }
+    });
+    return zoomAnimator;
+  }
+
+  private Animator createBearingAnimator(double currentBearing, double targetBearing) {
+
+    float modifiedTargetBearing = normalizeBearing((float) currentBearing, (float) targetBearing);
+    ValueAnimator bearingAnimator = ValueAnimator.ofFloat((float) currentBearing, modifiedTargetBearing);
+    bearingAnimator.setDuration(1000);
+    bearingAnimator.setInterpolator(new LinearInterpolator());
+    bearingAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+      @Override
+      public void onAnimationUpdate(ValueAnimator animation) {
+        mapboxMap.setBearing((Float) animation.getAnimatedValue());
+      }
+    });
+    return bearingAnimator;
+  }
+
+  private Animator createTiltAnimator(double currentTilt, double targetTilt) {
+    ValueAnimator tiltAnimator = ValueAnimator.ofFloat((float) currentTilt, (float) targetTilt);
+    tiltAnimator.setDuration(2500);
+    tiltAnimator.setInterpolator(new DecelerateInterpolator());
+    tiltAnimator.addUpdateListener(new ValueAnimator.AnimatorUpdateListener() {
+      @Override
+      public void onAnimationUpdate(ValueAnimator animation) {
+        mapboxMap.setTilt((Float) animation.getAnimatedValue());
+      }
+    });
+    return tiltAnimator;
+  }
+
+  private static class LatLngEvaluator implements TypeEvaluator<LatLng> {
+
+    private final LatLng latLng = new LatLng();
+
+    @Override
+    public LatLng evaluate(float fraction, LatLng startValue, LatLng endValue) {
+      latLng.setLatitude(startValue.getLatitude()
+        + ((endValue.getLatitude() - startValue.getLatitude()) * fraction));
+      latLng.setLongitude(startValue.getLongitude()
+        + ((endValue.getLongitude() - startValue.getLongitude()) * fraction));
+      return latLng;
     }
   }
 
-  /**
-   * Creates a camera position based on the given route.
-   * <p>
-   * From the {@link DirectionsRoute}, an initial bearing and target position are created.
-   * Then using a preset tilt and zoom (based on screen orientation), a {@link CameraPosition} is built.
-   *
-   * @param route used to build the camera position
-   * @return camera position to be animated to
-   */
-  @NonNull
-  private CameraPosition buildCameraPositionFromRoute(DirectionsRoute route) {
-    LineString lineString = LineString.fromPolyline(route.geometry(), Constants.PRECISION_6);
-
-    double initialBearing = TurfMeasurement.bearing(
-      Point.fromLngLat(
-        lineString.getCoordinates().get(0).getLongitude(), lineString.getCoordinates().get(0).getLatitude()
-      ),
-      Point.fromLngLat(
-        lineString.getCoordinates().get(1).getLongitude(), lineString.getCoordinates().get(1).getLatitude()
-      )
-    );
-
-    Point targetPoint = TurfMeasurement.destination(
-      Point.fromLngLat(
-        lineString.getCoordinates().get(0).getLongitude(), lineString.getCoordinates().get(0).getLatitude()
-      ),
-      targetDistance, initialBearing, TurfConstants.UNIT_METERS
-    );
-
-    LatLng target = new LatLng(
-      targetPoint.latitude(),
-      targetPoint.longitude()
-    );
-
-    return new CameraPosition.Builder()
-      .tilt(CAMERA_TILT)
-      .zoom(CAMERA_ZOOM)
-      .target(target)
-      .bearing(initialBearing)
-      .build();
-  }
-
-  /**
-   * Creates a camera position based on the given location.
-   * <p>
-   * From the {@link Location}, a target position is created.
-   * Then using a preset tilt and zoom (based on screen orientation), a {@link CameraPosition} is built.
-   *
-   * @param location used to build the camera position
-   * @return camera position to be animated to
-   */
-  @NonNull
-  private CameraPosition buildCameraPositionFromLocation(Location location) {
-    Point targetPoint = TurfMeasurement.destination(
-      Point.fromLngLat(location.getLongitude(), location.getLatitude()),
-      targetDistance, location.getBearing(), TurfConstants.UNIT_METERS
-    );
-
-    LatLng target = new LatLng(
-      targetPoint.latitude(),
-      targetPoint.longitude()
-    );
-
-    return new CameraPosition.Builder()
-      .tilt(CAMERA_TILT)
-      .zoom(CAMERA_ZOOM)
-      .target(target)
-      .bearing(location.getBearing())
-      .build();
+  private float normalizeBearing(float currentBearing, float targetBearing) {
+    double diff = currentBearing - targetBearing;
+    if (diff > 180.0f) {
+      targetBearing += 360.0f;
+    } else if (diff < -180.0f) {
+      targetBearing -= 360.f;
+    }
+    return targetBearing;
   }
 
   /**
