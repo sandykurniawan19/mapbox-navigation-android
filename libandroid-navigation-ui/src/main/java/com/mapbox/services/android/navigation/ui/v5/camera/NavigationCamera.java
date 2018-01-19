@@ -5,9 +5,11 @@ import android.animation.AnimatorSet;
 import android.animation.TypeEvaluator;
 import android.animation.ValueAnimator;
 import android.content.Context;
+import android.content.res.Resources;
 import android.location.Location;
 import android.support.annotation.NonNull;
 import android.util.SparseArray;
+import android.util.TypedValue;
 import android.view.View;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.LinearInterpolator;
@@ -18,6 +20,7 @@ import com.mapbox.geojson.Point;
 import com.mapbox.mapboxsdk.camera.CameraPosition;
 import com.mapbox.mapboxsdk.camera.CameraUpdateFactory;
 import com.mapbox.mapboxsdk.geometry.LatLng;
+import com.mapbox.mapboxsdk.geometry.LatLngBounds;
 import com.mapbox.mapboxsdk.maps.MapboxMap;
 import com.mapbox.services.android.navigation.v5.navigation.MapboxNavigation;
 import com.mapbox.services.android.navigation.v5.routeprogress.ProgressChangeListener;
@@ -52,6 +55,7 @@ public class NavigationCamera implements ProgressChangeListener {
   private CameraPosition currentCameraPosition;
   private double targetDistance;
   private boolean trackingEnabled = true;
+  private int topPadding;
 
   /**
    * Creates an instance of {@link NavigationCamera}.
@@ -65,7 +69,14 @@ public class NavigationCamera implements ProgressChangeListener {
                           @NonNull MapboxNavigation navigation) {
     this.mapboxMap = mapboxMap;
     this.navigation = navigation;
+    this.topPadding = convertDpToPx(view.getContext(), 200);
+    Timber.d("Top padding: " + topPadding);
     initialize(view);
+  }
+
+  private int convertDpToPx(Context context, int dp){
+    Resources resources = context.getResources();
+    return (int) TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, dp, resources.getDisplayMetrics());
   }
 
   /**
@@ -137,30 +148,65 @@ public class NavigationCamera implements ProgressChangeListener {
    */
   @Override
   public void onProgressChange(Location location, RouteProgress routeProgress) {
+
     if (location.getLongitude() != 0 && location.getLatitude() != 0) {
 
-      // Target bearing
-      double targetBearing = location.getBearing();
-      Timber.d("Target bearing: " + targetBearing);
+      if (routeProgress.currentLegProgress().upComingStep().maneuver() != null) {
+        Point stepManeuverPoint = routeProgress.currentLegProgress().upComingStep().maneuver().location();
+        List<LatLng> latLngs = new ArrayList<>();
+        LatLng stepLatLng = new LatLng(stepManeuverPoint.latitude(), stepManeuverPoint.longitude());
+        LatLng currentLatLng = new LatLng(location);
+        latLngs.add(stepLatLng);
+        latLngs.add(currentLatLng);
 
-      double distanceRemaining = routeProgress.currentLegProgress().currentStepProgress().distanceRemaining();
-      Timber.d("Distance remaining: " + distanceRemaining);
-      double targetTilt;
-      if (distanceRemaining > 200) {
-        targetTilt = CAMERA_TILT;
-      } else if (distanceRemaining > 150) {
-        targetTilt = 35;
-      } else if (distanceRemaining > 100) {
-        targetTilt = 25;
-      } else if (distanceRemaining > 50) {
-        targetTilt = 15;
-      } else {
-        targetTilt = 0;
+        if (latLngs.size() < 2) {
+          return;
+        }
+
+        LatLngBounds cameraBounds = new LatLngBounds.Builder().includes(latLngs).build();
+
+        // left, top, right, bottom
+        int[] padding = {0, topPadding, 0, 100};
+        CameraPosition position = mapboxMap.getCameraForLatLngBounds(cameraBounds, padding);
+
+        double zoom;
+        if (position.zoom > 16) {
+          zoom = 16;
+        } else {
+          zoom = position.zoom;
+        }
+
+        double distanceRemaining = routeProgress.currentLegProgress().currentStepProgress().distanceRemaining();
+        Timber.d("Distance remaining: " + distanceRemaining);
+        double targetTilt;
+        if (distanceRemaining > 200) {
+          targetTilt = 50;
+        } else if (distanceRemaining > 150) {
+          targetTilt = 35;
+        } else if (distanceRemaining > 100) {
+          targetTilt = 25;
+        } else if (distanceRemaining > 50) {
+          targetTilt = 15;
+        } else {
+          targetTilt = 0;
+        }
+
+        Timber.d("Position tilt: " + position.tilt);
+
+        Timber.d("Target Lat: %s Lng: %s", position.target.getLatitude(), position.target.getLongitude());
+        Timber.d("Zoom: %s", zoom);
+        Timber.d("Bearing: %s", location.getBearing());
+        Timber.d("Tilt: %s", 50);
+
+        createFollowAnimator(mapboxMap.getCameraPosition(), position.target, zoom, location.getBearing(), targetTilt).start();
       }
 
-      LatLng targetLatLng = createTargetLatLng(location, targetTilt);
+//      // Target bearing
+//      double targetBearing = location.getBearing();
+//      Timber.d("Target bearing: " + targetBearing);
+//
+//      LatLng targetLatLng = createTargetLatLng(location, targetTilt);
 
-      createFollowAnimator(mapboxMap.getCameraPosition(), targetLatLng, CAMERA_ZOOM, targetBearing, targetTilt).start();
     }
   }
 
